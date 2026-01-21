@@ -12,7 +12,22 @@ Aplicação web para análise fundamentalista completa de todas as BDRs (Brazili
    - `requirements.txt` (dependências)
    - `README.md` (este arquivo)
 
-### Passo 2: Deploy no Streamlit
+### Passo 2: Configurar Secrets (Opcional)
+
+No Streamlit Cloud, vá em **App settings → Secrets** e adicione:
+
+```toml
+# WhatsApp (opcional - para envio de notificações)
+WHATSAPP_PHONE = "+556299755774"
+WHATSAPP_APIKEY = "sua_chave_aqui"
+
+# BRAPI Token (opcional - funciona sem também)
+BRAPI_API_TOKEN = "seu_token_aqui"
+```
+
+**Nota**: Os secrets são opcionais. O app funciona perfeitamente sem eles!
+
+### Passo 3: Deploy no Streamlit
 
 1. Acesse [share.streamlit.io](https://share.streamlit.io)
 2. Faça login com sua conta GitHub
@@ -115,10 +130,14 @@ analise-bdrs/
 
 ## ⚠️ Observações
 
-- Os dados são obtidos em tempo real do Yahoo Finance
-- A análise pode levar alguns minutos devido ao volume de BDRs
-- Cache de 1 hora para otimizar performance
-- Rate limiting de 300ms entre requisições para evitar bloqueios
+- **Rate Limiting**: O app usa delays de 1-3 segundos entre requisições para evitar bloqueio do Yahoo Finance
+- **Tempo de Análise**: 
+  - 50 BDRs: ~2-3 minutos
+  - 150 BDRs: ~10-15 minutos
+  - 400 BDRs: ~30-40 minutos
+- **Cache**: Dados são armazenados em cache por 1 hora
+- **Secrets**: WhatsApp e BRAPI são opcionais - o app funciona sem eles
+- **BRAPI**: Usa o método original (sem autenticação) que funciona perfeitamente
 
 ## 🤝 Contribuições
 
