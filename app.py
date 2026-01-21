@@ -22,6 +22,16 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Secrets (configurar no Streamlit Cloud)
+try:
+    WHATSAPP_PHONE = st.secrets["WHATSAPP_PHONE"]
+    WHATSAPP_APIKEY = st.secrets["WHATSAPP_APIKEY"]
+    BRAPI_API_TOKEN = st.secrets.get("BRAPI_API_TOKEN", "")
+except:
+    WHATSAPP_PHONE = ""
+    WHATSAPP_APIKEY = ""
+    BRAPI_API_TOKEN = ""
+
 PERIODOS = 5
 TERMINACOES_BDR = ('31', '32', '33', '34', '35', '39')
 
@@ -53,23 +63,27 @@ MAPA_BDRS_COMPLETO = {
     'REGN34': 'REGN', 'BKNG34': 'BKNG', 'CMCS34': 'CMCSA', 'EQIX34': 'EQIX',
     'A1MT34': 'AMT', 'P1LD34': 'PLD', 'MDLZ34': 'MDLZ', 'SCHW34': 'SCHW',
     'RGTI34': 'RGTI', 'T2DH34': 'TDG', 'DUOL34': 'DUOL', 'B1AX34': 'BAX',
-    'TSMC34': 'TSM', 'ASML34': 'ASML',
+    'TSMC34': 'TSM', 'ASML34': 'ASML', 'N1VS34': 'NVS', 'D1HI34': 'DHI',
+    'GPRK34': 'GPRK', 'C1NS34': 'CNS', 'T2ER34': 'TER', 'F1MC34': 'FMC',
+    'G1LO34': 'GLOB', 'T1RI34': 'TRI', 'R1MD34': 'RMD', 'S2NA34': 'SNA',
+    'A1MP34': 'AMP', 'G1SK34': 'GSK',
 }
 
 # ============================================================
-# CACHE E FUNÇÕES
+# CACHE E FUNÇÕES - MÉTODO ORIGINAL
 # ============================================================
 
 _cache_ticker = {}
 
 @st.cache_data(ttl=3600)
 def obter_bdrs():
-    """Obtém lista de BDRs via BRAPI"""
+    """Obtém lista de BDRs via BRAPI - MÉTODO ORIGINAL"""
     try:
         url = "https://brapi.dev/api/quote/list"
         r = requests.get(url, timeout=30)
         dados = r.json().get('stocks', [])
         
+        # Filtrar BDRs - IGUAL AO ORIGINAL
         bdrs_raw = [d for d in dados if d['stock'].endswith(TERMINACOES_BDR)]
         lista_tickers = [d['stock'] for d in bdrs_raw]
         mapa_nomes = {d['stock']: d.get('name', d['stock']) for d in bdrs_raw}
@@ -94,18 +108,34 @@ def obter_bdrs():
         return []
 
 def calcular_indicadores(ticker_us):
-    """Calcula indicadores fundamentalistas"""
+    """Calcula indicadores fundamentalistas com retry e delay"""
     if ticker_us in _cache_ticker:
         return _cache_ticker[ticker_us]
     
+    # DELAY ENTRE REQUISIÇÕES (IMPORTANTE!)
+    time.sleep(1)  # 1 segundo entre cada ticker
+    
+    resultado = None
+    
     try:
-        acao = yf.Ticker(ticker_us)
-        info = acao.get_info()
+        # RETRY MECHANISM
+        for tentativa in range(3):
+            try:
+                acao = yf.Ticker(ticker_us)
+                info = acao.get_info()
+                
+                if info and len(info) > 5:
+                    break
+                    
+                time.sleep(2)  # Espera 2s antes de tentar novamente
+                
+            except Exception as e:
+                if tentativa == 2:  # Última tentativa
+                    _cache_ticker[ticker_us] = None
+                    return None
+                time.sleep(3)  # Espera 3s em caso de erro
         
-        if not info or len(info) < 5:
-            _cache_ticker[ticker_us] = None
-            return None
-        
+        # Obter demonstrativos
         dre = acao.financials
         balanco = acao.balance_sheet
         
@@ -121,7 +151,7 @@ def calcular_indicadores(ticker_us):
         dre = dre.head(PERIODOS)
         balanco = balanco.head(PERIODOS)
         
-        # Buscar colunas
+        # Buscar colunas (múltiplas tentativas)
         lucro = None
         for col in ["Net Income", "NetIncome", "Net Income Common Stockholders"]:
             if col in dre.columns:
@@ -279,6 +309,19 @@ def classificar_bdr(df_indicadores, valuation_data):
     
     return status, score, alertas
 
+def enviar_whatsapp(mensagem):
+    """Envia relatório via WhatsApp (opcional)"""
+    if not WHATSAPP_PHONE or not WHATSAPP_APIKEY:
+        return False
+    
+    try:
+        url = "https://api.textmebot.com/send.php"
+        payload = {'phone': WHATSAPP_PHONE, 'apikey': WHATSAPP_APIKEY, 'text': mensagem}
+        response = requests.post(url, data=payload, timeout=60)
+        return response.status_code == 200
+    except:
+        return False
+
 # ============================================================
 # INTERFACE STREAMLIT
 # ============================================================
@@ -287,11 +330,25 @@ def main():
     # Header
     st.title("📊 Análise Fundamentalista de BDRs")
     st.markdown("**Análise completa de todas as BDRs listadas na B3 com dados das empresas-mãe americanas**")
+    
+    # Aviso importante
+    st.info("⏱️ **Atenção**: A análise completa pode levar 5-10 minutos devido aos delays necessários para evitar bloqueio do Yahoo Finance.")
+    
     st.markdown("---")
     
     # Sidebar
     with st.sidebar:
         st.header("⚙️ Configurações")
+        
+        # Limite de BDRs para análise
+        limite_bdrs = st.number_input(
+            "Limite de BDRs para analisar",
+            min_value=10,
+            max_value=400,
+            value=50,
+            step=10,
+            help="Recomendado: 50 para teste (2-3 min), 150 para análise completa (10-15 min)"
+        )
         
         filtro_status = st.multiselect(
             "Filtrar por Status",
@@ -299,17 +356,15 @@ def main():
             default=["🟢 Excelente", "🟡 Bom"]
         )
         
-        filtro_setor = st.multiselect(
-            "Filtrar por Setor",
-            []  # Será preenchido após análise
-        )
-        
         min_roe = st.slider("ROE Mínimo (%)", 0, 50, 0)
         min_dividend = st.slider("Dividend Yield Mínimo (%)", 0.0, 10.0, 0.0)
         
-        if st.button("🔄 Atualizar Análise", type="primary"):
+        enviar_wpp = st.checkbox("Enviar resumo via WhatsApp", value=False)
+        
+        if st.button("🔄 Limpar Cache", type="secondary"):
             st.cache_data.clear()
-            st.rerun()
+            _cache_ticker.clear()
+            st.success("Cache limpo!")
         
         st.markdown("---")
         st.markdown("### 📖 Legenda")
@@ -321,28 +376,36 @@ def main():
         """)
     
     # Buscar BDRs
-    with st.spinner("Buscando BDRs..."):
+    with st.spinner("Buscando BDRs da B3..."):
         bdrs = obter_bdrs()
     
     if not bdrs:
         st.error("❌ Não foi possível obter a lista de BDRs")
         return
     
-    st.success(f"✅ {len(bdrs)} BDRs encontradas")
+    st.success(f"✅ {len(bdrs)} BDRs encontradas na B3")
     
     # Botão para iniciar análise
-    if st.button("🚀 Iniciar Análise Completa", type="primary"):
+    if st.button("🚀 Iniciar Análise Fundamentalista", type="primary"):
+        
+        bdrs_analise = bdrs[:limite_bdrs]
+        
+        st.warning(f"⏱️ Analisando {len(bdrs_analise)} BDRs... Isso pode levar ~{len(bdrs_analise)//10} minutos")
         
         progress_bar = st.progress(0)
         status_text = st.empty()
+        stats_text = st.empty()
         
         resultado = []
-        total = len(bdrs)
+        total = len(bdrs_analise)
+        sucesso = 0
+        falhas = 0
         
-        for idx, (bdr, ticker_us, nome) in enumerate(bdrs, 1):
+        for idx, (bdr, ticker_us, nome) in enumerate(bdrs_analise, 1):
             progress = idx / total
             progress_bar.progress(progress)
-            status_text.text(f"Analisando {idx}/{total}: {bdr} → {ticker_us}")
+            status_text.text(f"[{idx}/{total}] {bdr} → {ticker_us}")
+            stats_text.text(f"✅ Sucesso: {sucesso} | ⚠️ Sem dados: {falhas}")
             
             dados = calcular_indicadores(ticker_us)
             
@@ -366,11 +429,13 @@ def main():
                     "Market Cap (B)": round(dados.get('market_cap', 0) / 1e9, 2),
                     "Alertas": ", ".join(alertas) if alertas else "OK"
                 })
-            
-            time.sleep(0.3)  # Rate limiting
+                sucesso += 1
+            else:
+                falhas += 1
         
         progress_bar.empty()
         status_text.empty()
+        stats_text.empty()
         
         if not resultado:
             st.error("❌ Nenhuma BDR com dados suficientes")
@@ -382,6 +447,23 @@ def main():
         
         # Salvar no session state
         st.session_state['df_analise'] = df
+        
+        st.success(f"✅ Análise concluída! {sucesso} BDRs analisadas com sucesso")
+        
+        # Enviar WhatsApp se solicitado
+        if enviar_wpp:
+            with st.spinner("Enviando WhatsApp..."):
+                msg = f"""🔔 Análise BDRs Concluída
+                
+Total: {len(df)}
+🟢 Excelentes: {len(df[df['Status'].str.contains('Excelente')])}
+🟡 Bons: {len(df[df['Status'].str.contains('Bom')])}
+
+Top 5:
+{chr(10).join([f"{i+1}. {row['BDR']} - Score: {row['Score']}" for i, row in df.head(5).iterrows()])}
+"""
+                if enviar_whatsapp(msg):
+                    st.success("📱 Resumo enviado via WhatsApp!")
     
     # Exibir resultados se existirem
     if 'df_analise' in st.session_state:
@@ -405,7 +487,7 @@ def main():
         st.markdown("---")
         
         # Tabs
-        tab1, tab2, tab3, tab4 = st.tabs(["📊 Ranking", "📈 Gráficos", "🔍 Detalhes", "💾 Download"])
+        tab1, tab2, tab3 = st.tabs(["📊 Ranking", "📈 Gráficos", "💾 Download"])
         
         with tab1:
             st.subheader("🏆 Ranking Geral")
@@ -423,8 +505,7 @@ def main():
                 df_filtrado = df_filtrado[df_filtrado['Div Yield (%)'] >= min_dividend]
             
             st.dataframe(
-                df_filtrado[['BDR', 'Empresa', 'Status', 'Score', 'ROE (%)', 'Margem (%)', 
-                            'Div Yield (%)', 'P/E', 'Setor']],
+                df_filtrado,
                 use_container_width=True,
                 height=600
             )
@@ -435,107 +516,50 @@ def main():
             col1, col2 = st.columns(2)
             
             with col1:
-                # Pizza - Distribuição
+                # Pizza
                 status_counts = df['Status'].value_counts()
                 fig_pizza = px.pie(
                     values=status_counts.values,
                     names=status_counts.index,
-                    title="Distribuição por Status",
-                    color_discrete_sequence=['#2ecc71', '#f1c40f', '#e67e22', '#e74c3c']
+                    title="Distribuição por Status"
                 )
                 st.plotly_chart(fig_pizza, use_container_width=True)
             
             with col2:
-                # Barras - Top 10 ROE
+                # Top ROE
                 top_roe = df.nlargest(10, 'ROE (%)')
                 fig_bar = px.bar(
                     top_roe,
                     x='ROE (%)',
                     y='BDR',
                     orientation='h',
-                    title="Top 10 BDRs por ROE",
-                    color='ROE (%)',
-                    color_continuous_scale='Blues'
+                    title="Top 10 por ROE"
                 )
                 fig_bar.update_layout(yaxis={'categoryorder':'total ascending'})
                 st.plotly_chart(fig_bar, use_container_width=True)
             
-            # Scatter - ROE vs Crescimento
+            # Scatter
             fig_scatter = px.scatter(
                 df,
                 x='ROE (%)',
                 y='Cresc (%)',
                 size='Market Cap (B)',
                 color='Score',
-                hover_data=['BDR', 'Empresa', 'Status'],
-                title="ROE vs Crescimento de Receita",
-                color_continuous_scale='RdYlGn'
+                hover_data=['BDR', 'Empresa'],
+                title="ROE vs Crescimento"
             )
             st.plotly_chart(fig_scatter, use_container_width=True)
-            
-            # Setores
-            setor_counts = df['Setor'].value_counts().head(10)
-            fig_setor = px.bar(
-                x=setor_counts.values,
-                y=setor_counts.index,
-                orientation='h',
-                title="Top 10 Setores",
-                labels={'x': 'Quantidade', 'y': 'Setor'}
-            )
-            fig_setor.update_layout(yaxis={'categoryorder':'total ascending'})
-            st.plotly_chart(fig_setor, use_container_width=True)
         
         with tab3:
-            st.subheader("🔍 Análise Detalhada")
-            
-            bdr_selecionada = st.selectbox(
-                "Selecione uma BDR",
-                df['BDR'].tolist()
-            )
-            
-            if bdr_selecionada:
-                info = df[df['BDR'] == bdr_selecionada].iloc[0]
-                
-                col1, col2, col3 = st.columns(3)
-                
-                with col1:
-                    st.metric("Status", info['Status'])
-                    st.metric("Score", f"{info['Score']}/6")
-                    st.metric("Setor", info['Setor'])
-                
-                with col2:
-                    st.metric("ROE", f"{info['ROE (%)']}%")
-                    st.metric("Margem Líquida", f"{info['Margem (%)']}%")
-                    st.metric("Crescimento", f"{info['Cresc (%)']}%")
-                
-                with col3:
-                    st.metric("P/E Ratio", f"{info['P/E']:.2f}" if not pd.isna(info['P/E']) else "N/A")
-                    st.metric("Dividend Yield", f"{info['Div Yield (%)']}%")
-                    st.metric("Market Cap", f"${info['Market Cap (B)']}B")
-                
-                if info['Alertas'] != "OK":
-                    st.warning(f"⚠️ Alertas: {info['Alertas']}")
-                else:
-                    st.success("✅ Nenhum alerta")
-        
-        with tab4:
-            st.subheader("💾 Download dos Dados")
-            
-            # Excel
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M')
-            excel_filename = f"bdrs_analise_{timestamp}.xlsx"
+            st.subheader("💾 Download")
             
             csv = df.to_csv(index=False).encode('utf-8')
             st.download_button(
                 label="📥 Download CSV",
                 data=csv,
-                file_name=f"bdrs_analise_{timestamp}.csv",
+                file_name=f"bdrs_analise_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
                 mime="text/csv"
             )
-            
-            st.markdown("---")
-            st.markdown("### 📊 Estatísticas Gerais")
-            st.write(df.describe())
 
 if __name__ == "__main__":
     main()
