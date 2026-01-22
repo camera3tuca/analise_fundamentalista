@@ -1,5 +1,5 @@
 # app.py
-# Análise Fundamentalista de BDRs - Streamlit App
+# Análise Fundamentalista de BDRs - MÉTODO COLAB QUE FUNCIONA
 
 import streamlit as st
 import yfinance as yf
@@ -7,7 +7,6 @@ import pandas as pd
 import numpy as np
 import requests
 import plotly.express as px
-import plotly.graph_objects as go
 from datetime import datetime
 import time
 
@@ -26,11 +25,9 @@ st.set_page_config(
 try:
     WHATSAPP_PHONE = st.secrets["WHATSAPP_PHONE"]
     WHATSAPP_APIKEY = st.secrets["WHATSAPP_APIKEY"]
-    BRAPI_API_TOKEN = st.secrets.get("BRAPI_API_TOKEN", "")
 except:
     WHATSAPP_PHONE = ""
     WHATSAPP_APIKEY = ""
-    BRAPI_API_TOKEN = ""
 
 PERIODOS = 5
 TERMINACOES_BDR = ('31', '32', '33', '34', '35', '39')
@@ -42,7 +39,7 @@ CRITERIOS = {
 }
 
 # ============================================================
-# MAPEAMENTO BDR → TICKER US
+# MAPEAMENTO BDR → TICKER US (IGUAL AO COLAB)
 # ============================================================
 
 MAPA_BDRS_COMPLETO = {
@@ -70,146 +67,151 @@ MAPA_BDRS_COMPLETO = {
 }
 
 # ============================================================
-# CACHE E FUNÇÕES - MÉTODO ORIGINAL
+# FUNÇÕES - EXATAMENTE COMO NO COLAB
 # ============================================================
 
-_cache_ticker = {}
-
 @st.cache_data(ttl=3600)
-def obter_bdrs_com_dados():
-    """Obtém BDRs com dados fundamentalistas da BRAPI"""
+def obter_bdrs():
+    """Obtém lista de BDRs via BRAPI - MÉTODO ORIGINAL DO COLAB"""
     try:
         url = "https://brapi.dev/api/quote/list"
         r = requests.get(url, timeout=30)
         dados = r.json().get('stocks', [])
         
-        # Filtrar BDRs
         bdrs_raw = [d for d in dados if d['stock'].endswith(TERMINACOES_BDR)]
+        lista_tickers = [d['stock'] for d in bdrs_raw]
+        mapa_nomes = {d['stock']: d.get('name', d['stock']) for d in bdrs_raw}
         
         bdrs_processadas = []
-        for d in bdrs_raw:
-            ticker_bdr = d['stock']
-            
+        for ticker_bdr in lista_tickers:
             if ticker_bdr in MAPA_BDRS_COMPLETO:
                 ticker_us = MAPA_BDRS_COMPLETO[ticker_bdr]
             else:
                 ticker_us = ''.join([c for c in ticker_bdr if c.isalpha()])
             
             if ticker_us:
-                bdrs_processadas.append({
-                    'bdr': ticker_bdr,
-                    'ticker_us': ticker_us,
-                    'nome': d.get('name', ticker_bdr),
-                    'preco_bdr': d.get('regularMarketPrice', 0),
-                    'logo': d.get('logourl', '')
-                })
+                bdrs_processadas.append((
+                    ticker_bdr, 
+                    ticker_us, 
+                    mapa_nomes.get(ticker_bdr, ticker_bdr)
+                ))
         
         return bdrs_processadas
     except Exception as e:
         st.error(f"Erro ao buscar BDRs: {e}")
         return []
 
-def calcular_indicadores(ticker_us, ticker_bdr):
-    """Calcula indicadores - versão simplificada com dados disponíveis"""
-    
-    cache_key = f"{ticker_us}_{ticker_bdr}"
-    if cache_key in _cache_ticker:
-        return _cache_ticker[cache_key]
-    
-    time.sleep(0.3)  # Delay mínimo
-    
+def calcular_indicadores_empresa_mae(ticker_us):
+    """Busca dados fundamentalistas - EXATAMENTE COMO NO COLAB"""
     try:
-        # Buscar dados da BRAPI primeiro
-        url = f"https://brapi.dev/api/quote/{ticker_bdr}?range=1y&fundamental=true"
-        r = requests.get(url, timeout=10)
+        acao = yf.Ticker(ticker_us)
         
-        if r.status_code != 200:
-            _cache_ticker[cache_key] = None
+        # Obter demonstrativos
+        dre = acao.financials
+        balanco = acao.balance_sheet
+        info = acao.info
+        
+        # Validar dados básicos
+        if dre.empty or balanco.empty:
             return None
         
-        data = r.json()
-        if 'results' not in data or len(data['results']) == 0:
-            _cache_ticker[cache_key] = None
+        # Transpor e limitar períodos
+        if hasattr(dre, 'T'):
+            dre = dre.T
+        if hasattr(balanco, 'T'):
+            balanco = balanco.T
+            
+        dre = dre.head(PERIODOS)
+        balanco = balanco.head(PERIODOS)
+        
+        # Extrair métricas - buscar em múltiplos nomes de colunas
+        lucro = None
+        for col_name in ["Net Income", "NetIncome", "Net Income Common Stockholders"]:
+            if col_name in dre.columns:
+                lucro = dre[col_name]
+                break
+        
+        receita = None
+        for col_name in ["Total Revenue", "TotalRevenue", "Total Revenues"]:
+            if col_name in dre.columns:
+                receita = dre[col_name]
+                break
+        
+        patrimonio = None
+        for col_name in ["Total Stockholder Equity", "Stockholders Equity", 
+                        "StockholdersEquity", "Total Equity Gross Minority Interest"]:
+            if col_name in balanco.columns:
+                patrimonio = balanco[col_name]
+                break
+        
+        ativo_total = None
+        for col_name in ["Total Assets", "TotalAssets"]:
+            if col_name in balanco.columns:
+                ativo_total = balanco[col_name]
+                break
+        
+        divida_total = None
+        for col_name in ["Total Debt", "Long Term Debt", "TotalDebt"]:
+            if col_name in balanco.columns:
+                divida_total = balanco[col_name]
+                break
+        
+        # Validação
+        if lucro is None or receita is None or patrimonio is None:
             return None
         
-        info_bdr = data['results'][0]
+        # Calcular indicadores
+        roe = (lucro / patrimonio) * 100
+        margem_liquida = (lucro / receita) * 100
+        crescimento_receita = receita.pct_change() * 100
+        roa = (lucro / ativo_total) * 100 if ativo_total is not None else pd.Series([np.nan])
         
-        # Extrair dados básicos
-        market_cap = info_bdr.get('marketCap', 0)
-        preco = info_bdr.get('regularMarketPrice', 0)
-        
-        # Dados fundamentais (quando disponíveis)
-        fundamental = info_bdr.get('summaryProfile', {})
-        setor = fundamental.get('sector', 'N/A')
-        
-        # P/E e outros múltiplos
-        pe = info_bdr.get('priceEarnings')
-        pb = info_bdr.get('priceToBook')
-        
-        # Dividend Yield
-        dividends_data = info_bdr.get('dividendsData', {})
-        dividend_yield = dividends_data.get('yield', 0)
-        if dividend_yield:
-            dividend_yield = dividend_yield * 100
-        
-        # Se não tem setor nem market cap, tentar Yahoo Finance
-        if (setor == 'N/A' or market_cap == 0) and ticker_us:
-            try:
-                acao = yf.Ticker(ticker_us)
-                yf_info = acao.get_info()
-                
-                if yf_info and len(yf_info) > 5:
-                    if setor == 'N/A':
-                        setor = yf_info.get('sector', 'N/A')
-                    if market_cap == 0:
-                        market_cap = yf_info.get('marketCap', 0)
-                    if not pe:
-                        pe = yf_info.get('trailingPE')
-                    if not pb:
-                        pb = yf_info.get('priceToBook')
-            except:
-                pass  # Ignora erros do Yahoo
-        
-        # Criar indicadores baseados nos dados disponíveis
-        # Se tem P/E, podemos estimar ROE e Margem
-        if pe and pe > 0:
-            # Estimativas baseadas em múltiplos de mercado
-            roe_estimado = max(8, min(35, 1200/pe))  # Fórmula empírica
-            margem_estimada = max(5, min(25, 500/pe))
-            crescimento_estimado = max(-5, min(15, (25 - pe) * 0.5))
+        if divida_total is not None and patrimonio is not None:
+            divida_pl = (divida_total / patrimonio) * 100
         else:
-            # Valores conservadores se não tem P/E
-            roe_estimado = 12
-            margem_estimada = 8
-            crescimento_estimado = 3
+            divida_pl = pd.Series([np.nan])
         
-        # Criar DataFrame de indicadores
+        # DataFrame de indicadores
         df_indicadores = pd.DataFrame({
-            "ROE (%)": [roe_estimado],
-            "Margem Líquida (%)": [margem_estimada],
-            "Crescimento Receita (%)": [crescimento_estimado],
+            "ROE (%)": roe,
+            "ROA (%)": roa,
+            "Margem Líquida (%)": margem_liquida,
+            "Crescimento Receita (%)": crescimento_receita,
+            "Dívida/PL (%)": divida_pl,
         })
         
-        resultado = {
-            'indicadores': df_indicadores,
-            'preco': preco,
-            'pe': pe,
-            'pb': pb,
+        df_limpo = df_indicadores.replace([np.inf, -np.inf], np.nan).dropna(how='all')
+        
+        if df_limpo.empty or len(df_limpo) < 2:
+            return None
+        
+        # Dados de mercado
+        preco_atual = info.get('currentPrice') or info.get('regularMarketPrice') or info.get('previousClose')
+        pe_ratio = info.get('trailingPE') or info.get('forwardPE')
+        pb_ratio = info.get('priceToBook')
+        
+        dividend_yield = 0
+        if info.get('dividendYield'):
+            dividend_yield = info.get('dividendYield') * 100
+        
+        market_cap = info.get('marketCap') or info.get('enterpriseValue') or 0
+        setor = info.get('sector') or info.get('industry') or 'N/A'
+        
+        return {
+            'indicadores': df_limpo.round(2),
+            'preco': preco_atual,
+            'pe': pe_ratio,
+            'pb': pb_ratio,
             'dividend_yield': round(dividend_yield, 2),
             'market_cap': market_cap,
-            'setor': setor,
-            'fonte': 'BRAPI'
+            'setor': setor
         }
         
-        _cache_ticker[cache_key] = resultado
-        return resultado
-        
     except Exception as e:
-        _cache_ticker[cache_key] = None
         return None
 
 def classificar_bdr(df_indicadores, valuation_data):
-    """Classifica BDR"""
+    """Classifica BDR - IGUAL AO COLAB"""
     score = 0
     max_score = 6
     alertas = []
@@ -277,30 +279,21 @@ def classificar_bdr(df_indicadores, valuation_data):
     
     return status, score, alertas
 
-def enviar_whatsapp(mensagem):
-    """Envia relatório via WhatsApp (opcional)"""
-    if not WHATSAPP_PHONE or not WHATSAPP_APIKEY:
-        return False
-    
-    try:
-        url = "https://api.textmebot.com/send.php"
-        payload = {'phone': WHATSAPP_PHONE, 'apikey': WHATSAPP_APIKEY, 'text': mensagem}
-        response = requests.post(url, data=payload, timeout=60)
-        return response.status_code == 200
-    except:
-        return False
-
 # ============================================================
 # INTERFACE STREAMLIT
 # ============================================================
 
 def main():
-    # Header
     st.title("📊 Análise Fundamentalista de BDRs")
-    st.markdown("**Análise completa de todas as BDRs listadas na B3 com dados das empresas-mãe americanas**")
+    st.markdown("**Análise baseada em dados REAIS das empresas-mãe americanas (Yahoo Finance)**")
     
-    # Aviso importante
-    st.info("⏱️ **Atenção**: A análise completa pode levar 5-10 minutos devido aos delays necessários para evitar bloqueio do Yahoo Finance.")
+    st.warning("""
+    ⚠️ **IMPORTANTE**: 
+    - Dados obtidos diretamente dos **demonstrativos financeiros** via Yahoo Finance
+    - **ROE, Margem e Crescimento** são calculados a partir de DRE e Balanço Patrimonial REAIS
+    - Recomendado: **30-50 BDRs** por análise (~2-3 minutos)
+    - Delay de 2s entre requisições para evitar bloqueio
+    """)
     
     st.markdown("---")
     
@@ -308,14 +301,13 @@ def main():
     with st.sidebar:
         st.header("⚙️ Configurações")
         
-        # Limite de BDRs para análise
         limite_bdrs = st.number_input(
-            "Limite de BDRs para analisar",
+            "Número de BDRs para analisar",
             min_value=10,
-            max_value=400,
-            value=50,
+            max_value=100,
+            value=30,
             step=10,
-            help="Recomendado: 50 para teste (2-3 min), 150 para análise completa (10-15 min)"
+            help="Máximo recomendado: 50 BDRs"
         )
         
         filtro_status = st.multiselect(
@@ -327,11 +319,8 @@ def main():
         min_roe = st.slider("ROE Mínimo (%)", 0, 50, 0)
         min_dividend = st.slider("Dividend Yield Mínimo (%)", 0.0, 10.0, 0.0)
         
-        enviar_wpp = st.checkbox("Enviar resumo via WhatsApp", value=False)
-        
-        if st.button("🔄 Limpar Cache", type="secondary"):
+        if st.button("🔄 Limpar Cache"):
             st.cache_data.clear()
-            _cache_ticker.clear()
             st.success("Cache limpo!")
         
         st.markdown("---")
@@ -345,7 +334,7 @@ def main():
     
     # Buscar BDRs
     with st.spinner("Buscando BDRs da B3..."):
-        bdrs = obter_bdrs_com_dados()
+        bdrs = obter_bdrs()
     
     if not bdrs:
         st.error("❌ Não foi possível obter a lista de BDRs")
@@ -353,141 +342,135 @@ def main():
     
     st.success(f"✅ {len(bdrs)} BDRs encontradas na B3")
     
-    st.info("""
-    ℹ️ **Como funciona a análise:**
-    - Dados de **P/E, Market Cap e Dividend Yield** são obtidos diretamente da BRAPI
-    - Indicadores **ROE, Margem e Crescimento** são estimados com base em múltiplos de mercado
-    - Para análise detalhada, consulte os demonstrativos financeiros oficiais das empresas
-    """)
+    # Mostrar exemplos de mapeamento
+    with st.expander("📋 Ver Exemplos de Mapeamento BDR → US"):
+        exemplos = bdrs[:10]
+        for bdr, us, nome in exemplos:
+            st.text(f"{bdr} → {us} ({nome})")
     
-    # Botão para iniciar análise
+    # Mostrar exemplos de mapeamento
+    with st.expander("📋 Ver Exemplos de Mapeamento BDR → US"):
+        exemplos = bdrs[:10]
+        for bdr, us, nome in exemplos:
+            st.text(f"{bdr} → {us} ({nome})")
+    
+    # Botão de análise
     if st.button("🚀 Iniciar Análise Fundamentalista", type="primary"):
         
         bdrs_analise = bdrs[:limite_bdrs]
         
-        st.warning(f"⏱️ Analisando {len(bdrs_analise)} BDRs...")
+        st.info(f"🔄 Analisando {len(bdrs_analise)} BDRs... Tempo estimado: ~{len(bdrs_analise)*2//60} minutos")
         
         progress_bar = st.progress(0)
         status_text = st.empty()
-        stats_text = st.empty()
+        stats_container = st.empty()
+        log_container = st.expander("📝 Log Detalhado", expanded=False)
         
         resultado = []
         total = len(bdrs_analise)
         sucesso = 0
         falhas = 0
+        logs = []
         
-        for idx, bdr_info in enumerate(bdrs_analise, 1):
-            bdr = bdr_info['bdr']
-            ticker_us = bdr_info['ticker_us']
-            nome = bdr_info['nome']
-            
+        for idx, (bdr, ticker_us, nome) in enumerate(bdrs_analise, 1):
             progress = idx / total
             progress_bar.progress(progress)
             status_text.text(f"[{idx}/{total}] {bdr} → {ticker_us}")
-            stats_text.text(f"✅ Sucesso: {sucesso} | ⚠️ Sem dados: {falhas}")
+            stats_container.info(f"✅ Sucesso: {sucesso} | ⚠️ Sem dados: {falhas}")
             
-            dados = calcular_indicadores(ticker_us, bdr)
+            # DELAY CRÍTICO para evitar rate limit (2 segundos)
+            time.sleep(2)
             
-            if dados and dados['indicadores'] is not None:
-                df_ind = dados['indicadores']
-                media = df_ind.mean()
-                status, score, alertas = classificar_bdr(df_ind, dados)
+            log_msg = f"[{idx}] Buscando {ticker_us}..."
+            logs.append(log_msg)
+            
+            try:
+                dados = calcular_indicadores_empresa_mae(ticker_us)
                 
-                resultado.append({
-                    "BDR": bdr,
-                    "Ticker US": ticker_us,
-                    "Empresa": nome.split()[0] if nome else ticker_us,
-                    "Setor": dados.get('setor', 'N/A'),
-                    "Status": status,
-                    "Score": round(score, 1),
-                    "ROE (%)": round(media.get("ROE (%)", np.nan), 2),
-                    "Margem (%)": round(media.get("Margem Líquida (%)", np.nan), 2),
-                    "Cresc (%)": round(media.get("Crescimento Receita (%)", np.nan), 2),
-                    "P/E": round(dados.get('pe'), 2) if dados.get('pe') else np.nan,
-                    "Div Yield (%)": dados.get('dividend_yield', 0),
-                    "Market Cap (B)": round(dados.get('market_cap', 0) / 1e9, 2),
-                    "Alertas": ", ".join(alertas) if alertas else "OK"
-                })
-                sucesso += 1
-            else:
+                if dados and dados['indicadores'] is not None:
+                    df_ind = dados['indicadores']
+                    
+                    # Verificar se tem dados válidos
+                    if len(df_ind) > 0:
+                        media = df_ind.mean()
+                        status, score, alertas = classificar_bdr(df_ind, dados)
+                        
+                        resultado.append({
+                            "BDR": bdr,
+                            "Ticker US": ticker_us,
+                            "Empresa": nome.split()[0] if nome else ticker_us,
+                            "Setor": dados.get('setor', 'N/A'),
+                            "Status": status,
+                            "Score": round(score, 1),
+                            "ROE (%)": round(media.get("ROE (%)", np.nan), 2),
+                            "Margem (%)": round(media.get("Margem Líquida (%)", np.nan), 2),
+                            "Cresc (%)": round(media.get("Crescimento Receita (%)", np.nan), 2),
+                            "P/E": round(dados.get('pe'), 2) if dados.get('pe') else np.nan,
+                            "Div Yield (%)": dados.get('dividend_yield', 0),
+                            "Market Cap (B)": round(dados.get('market_cap', 0) / 1e9, 2),
+                            "Alertas": ", ".join(alertas) if alertas else "OK"
+                        })
+                        sucesso += 1
+                        logs.append(f"  ✅ Sucesso: {len(df_ind)} períodos")
+                    else:
+                        falhas += 1
+                        logs.append(f"  ⚠️ DataFrame vazio")
+                else:
+                    falhas += 1
+                    logs.append(f"  ⚠️ Sem dados")
+                    
+            except Exception as e:
                 falhas += 1
+                logs.append(f"  ❌ Erro: {str(e)[:100]}")
+            
+            # Atualizar log
+            with log_container:
+                st.text("\n".join(logs[-20:]))  # Últimas 20 linhas
         
         progress_bar.empty()
         status_text.empty()
-        stats_text.empty()
+        stats_container.empty()
         
         if not resultado:
             st.error("❌ Nenhuma BDR com dados suficientes")
             return
         
-        # Criar DataFrame
         df = pd.DataFrame(resultado)
         df = df.sort_values(by=["Score", "ROE (%)", "Div Yield (%)"], ascending=[False, False, False]).reset_index(drop=True)
         
-        # Salvar no session state
         st.session_state['df_analise'] = df
-        
-        st.success(f"✅ Análise concluída! {sucesso} BDRs analisadas com sucesso")
-        
-        # Enviar WhatsApp se solicitado
-        if enviar_wpp:
-            with st.spinner("Enviando WhatsApp..."):
-                msg = f"""🔔 Análise BDRs Concluída
-                
-Total: {len(df)}
-🟢 Excelentes: {len(df[df['Status'].str.contains('Excelente')])}
-🟡 Bons: {len(df[df['Status'].str.contains('Bom')])}
-
-Top 5:
-{chr(10).join([f"{i+1}. {row['BDR']} - Score: {row['Score']}" for i, row in df.head(5).iterrows()])}
-"""
-                if enviar_whatsapp(msg):
-                    st.success("📱 Resumo enviado via WhatsApp!")
+        st.success(f"✅ Análise concluída! {sucesso} BDRs analisadas")
     
-    # Exibir resultados se existirem
+    # Exibir resultados
     if 'df_analise' in st.session_state:
         df = st.session_state['df_analise']
         
-        # Métricas principais
         col1, col2, col3, col4 = st.columns(4)
-        
         with col1:
-            st.metric("Total Analisado", len(df))
+            st.metric("Total", len(df))
         with col2:
-            excelentes = len(df[df['Status'].str.contains('Excelente')])
-            st.metric("🟢 Excelentes", excelentes)
+            st.metric("🟢 Excelentes", len(df[df['Status'].str.contains('Excelente')]))
         with col3:
-            bons = len(df[df['Status'].str.contains('Bom')])
-            st.metric("🟡 Bons", bons)
+            st.metric("🟡 Bons", len(df[df['Status'].str.contains('Bom')]))
         with col4:
-            roe_medio = df['ROE (%)'].mean()
-            st.metric("ROE Médio", f"{roe_medio:.1f}%")
+            st.metric("ROE Médio", f"{df['ROE (%)'].mean():.1f}%")
         
         st.markdown("---")
         
-        # Tabs
         tab1, tab2, tab3 = st.tabs(["📊 Ranking", "📈 Gráficos", "💾 Download"])
         
         with tab1:
-            st.subheader("🏆 Ranking Geral")
+            st.subheader("🏆 Ranking")
             
-            # Aplicar filtros
             df_filtrado = df.copy()
-            
             if filtro_status:
                 df_filtrado = df_filtrado[df_filtrado['Status'].isin(filtro_status)]
-            
             if min_roe > 0:
                 df_filtrado = df_filtrado[df_filtrado['ROE (%)'] >= min_roe]
-            
             if min_dividend > 0:
                 df_filtrado = df_filtrado[df_filtrado['Div Yield (%)'] >= min_dividend]
             
-            st.dataframe(
-                df_filtrado,
-                use_container_width=True,
-                height=600
-            )
+            st.dataframe(df_filtrado, use_container_width=True, height=600)
         
         with tab2:
             st.subheader("📈 Visualizações")
@@ -495,49 +478,30 @@ Top 5:
             col1, col2 = st.columns(2)
             
             with col1:
-                # Pizza
                 status_counts = df['Status'].value_counts()
-                fig_pizza = px.pie(
-                    values=status_counts.values,
-                    names=status_counts.index,
-                    title="Distribuição por Status"
-                )
-                st.plotly_chart(fig_pizza, use_container_width=True)
+                fig = px.pie(values=status_counts.values, names=status_counts.index, 
+                            title="Distribuição por Status")
+                st.plotly_chart(fig, use_container_width=True)
             
             with col2:
-                # Top ROE
                 top_roe = df.nlargest(10, 'ROE (%)')
-                fig_bar = px.bar(
-                    top_roe,
-                    x='ROE (%)',
-                    y='BDR',
-                    orientation='h',
-                    title="Top 10 por ROE"
-                )
-                fig_bar.update_layout(yaxis={'categoryorder':'total ascending'})
-                st.plotly_chart(fig_bar, use_container_width=True)
+                fig = px.bar(top_roe, x='ROE (%)', y='BDR', orientation='h',
+                            title="Top 10 por ROE")
+                fig.update_layout(yaxis={'categoryorder':'total ascending'})
+                st.plotly_chart(fig, use_container_width=True)
             
-            # Scatter
-            fig_scatter = px.scatter(
-                df,
-                x='ROE (%)',
-                y='Cresc (%)',
-                size='Market Cap (B)',
-                color='Score',
-                hover_data=['BDR', 'Empresa'],
-                title="ROE vs Crescimento"
-            )
-            st.plotly_chart(fig_scatter, use_container_width=True)
+            fig = px.scatter(df, x='ROE (%)', y='Cresc (%)', size='Market Cap (B)',
+                           color='Score', hover_data=['BDR', 'Empresa'],
+                           title="ROE vs Crescimento")
+            st.plotly_chart(fig, use_container_width=True)
         
         with tab3:
-            st.subheader("💾 Download")
-            
             csv = df.to_csv(index=False).encode('utf-8')
             st.download_button(
-                label="📥 Download CSV",
-                data=csv,
-                file_name=f"bdrs_analise_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-                mime="text/csv"
+                "📥 Download CSV",
+                csv,
+                f"bdrs_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                "text/csv"
             )
 
 if __name__ == "__main__":
