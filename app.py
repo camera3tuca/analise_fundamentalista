@@ -126,15 +126,37 @@ def obter_todas_bdrs():
         st.error(f"Erro ao buscar BDRs: {e}")
         return []
 
-def calcular_indicadores_empresa_mae(ticker_us):
-    """Busca dados fundamentalistas da empresa americana"""
+def calcular_indicadores_empresa_mae(ticker_us, tentativa=1, max_tentativas=3):
+    """Busca dados fundamentalistas da empresa americana com retry e delay"""
     try:
+        # Delay progressivo para evitar rate limiting
+        if tentativa > 1:
+            delay = tentativa * 2
+            time.sleep(delay)
+        else:
+            time.sleep(1.5)  # Delay mínimo entre requisições
+        
+        # Criar sessão com headers customizados
+        import yfinance as yf
         acao = yf.Ticker(ticker_us)
-        info = acao.get_info()
+        
+        # Tentar obter info com retry
+        info = None
+        for i in range(2):
+            try:
+                info = acao.get_info()
+                if info and len(info) > 5:
+                    break
+            except Exception as e:
+                if "429" in str(e) and tentativa < max_tentativas:
+                    time.sleep(5)  # Espera 5 segundos em caso de 429
+                    return calcular_indicadores_empresa_mae(ticker_us, tentativa + 1, max_tentativas)
+                time.sleep(2)
         
         if not info or len(info) < 5:
             return None
         
+        # Tentar obter demonstrativos
         try:
             dre = acao.financials
             balanco = acao.balance_sheet
@@ -143,7 +165,10 @@ def calcular_indicadores_empresa_mae(ticker_us):
                 dre = dre.T
             if hasattr(balanco, 'T'):
                 balanco = balanco.T
-        except:
+        except Exception as e:
+            if "429" in str(e) and tentativa < max_tentativas:
+                time.sleep(5)
+                return calcular_indicadores_empresa_mae(ticker_us, tentativa + 1, max_tentativas)
             return None
         
         if dre is None or balanco is None or dre.empty or balanco.empty:
@@ -229,6 +254,10 @@ def calcular_indicadores_empresa_mae(ticker_us):
             'setor': setor
         }
     except Exception as e:
+        # Se for erro 429 e ainda temos tentativas, retry com delay maior
+        if "429" in str(e) and tentativa < max_tentativas:
+            time.sleep(10)
+            return calcular_indicadores_empresa_mae(ticker_us, tentativa + 1, max_tentativas)
         return None
 
 def classificar_tamanho(market_cap):
@@ -322,12 +351,22 @@ with st.sidebar:
         "Limite de BDRs para analisar",
         min_value=10,
         max_value=500,
-        value=50,
+        value=30,
         step=10,
-        help="Escolha quantas BDRs analisar (mais BDRs = mais tempo)"
+        help="⚠️ IMPORTANTE: Devido ao rate limiting do Yahoo Finance, recomendamos começar com 30-50 BDRs"
     )
     
-    st.info(f"⏱️ Tempo estimado: ~{limite_bdrs * 2 // 60} minutos")
+    delay_entre_req = st.slider(
+        "Delay entre requisições (segundos)",
+        min_value=1.0,
+        max_value=5.0,
+        value=2.0,
+        step=0.5,
+        help="Aumentar o delay ajuda a evitar erro 429 (Too Many Requests)"
+    )
+    
+    st.warning(f"⏱️ Tempo estimado: ~{int(limite_bdrs * delay_entre_req / 60)} minutos")
+    st.info("💡 Dica: Se der erro 429, aumente o delay ou reduza a quantidade de BDRs")
     
     if st.button("🚀 Iniciar Análise", type="primary", use_container_width=True):
         st.session_state.analisar = True
@@ -356,60 +395,82 @@ if 'analisar' in st.session_state and st.session_state.analisar:
     resultado = []
     sucesso = 0
     falhas = 0
+    erro_429_count = 0
     
     for idx, bdr_info in enumerate(lista_bdrs):
         bdr = bdr_info['bdr']
         ticker_us = bdr_info['ticker_us']
         nome = bdr_info['nome']
         
-        status_text.text(f"🔄 Processando [{idx+1}/{len(lista_bdrs)}]: {bdr} → {ticker_us}")
+        status_text.text(f"🔄 [{idx+1}/{len(lista_bdrs)}] {bdr} → {ticker_us}")
         
-        dados = calcular_indicadores_empresa_mae(ticker_us)
-        
-        if dados:
-            status, score, alertas = classificar_bdr(dados)
-            tamanho = classificar_tamanho(dados['market_cap'])
+        try:
+            dados = calcular_indicadores_empresa_mae(ticker_us)
             
-            resultado.append({
-                'BDR': bdr,
-                'Ticker US': ticker_us,
-                'Empresa': nome.split()[0] if nome else ticker_us,
-                'Setor': dados['setor'],
-                'Tamanho': tamanho,
-                'Status': status,
-                'Score': round(score, 1),
-                'ROE (%)': round(dados['roe'], 2),
-                'Margem (%)': round(dados['margem'], 2),
-                'Cresc (%)': round(dados['crescimento'], 2),
-                'Dívida/PL (%)': round(dados['dividapl'], 2),
-                'P/E': round(dados['pe'], 2) if dados['pe'] else np.nan,
-                'P/B': round(dados['pb'], 2) if dados['pb'] else np.nan,
-                'Div Yield (%)': round(dados['dividend_yield'], 2),
-                'Market Cap (B)': round(dados['market_cap'], 2),
-                'Alertas': ', '.join(alertas) if alertas else 'OK'
-            })
-            sucesso += 1
-        else:
+            if dados:
+                status, score, alertas = classificar_bdr(dados)
+                tamanho = classificar_tamanho(dados['market_cap'])
+                
+                resultado.append({
+                    'BDR': bdr,
+                    'Ticker US': ticker_us,
+                    'Empresa': nome.split()[0] if nome else ticker_us,
+                    'Setor': dados['setor'],
+                    'Tamanho': tamanho,
+                    'Status': status,
+                    'Score': round(score, 1),
+                    'ROE (%)': round(dados['roe'], 2),
+                    'Margem (%)': round(dados['margem'], 2),
+                    'Cresc (%)': round(dados['crescimento'], 2),
+                    'Dívida/PL (%)': round(dados['dividapl'], 2),
+                    'P/E': round(dados['pe'], 2) if dados['pe'] else np.nan,
+                    'P/B': round(dados['pb'], 2) if dados['pb'] else np.nan,
+                    'Div Yield (%)': round(dados['dividend_yield'], 2),
+                    'Market Cap (B)': round(dados['market_cap'], 2),
+                    'Alertas': ', '.join(alertas) if alertas else 'OK'
+                })
+                sucesso += 1
+            else:
+                falhas += 1
+        except Exception as e:
+            if "429" in str(e):
+                erro_429_count += 1
+                st.warning(f"⚠️ Rate limit atingido! Aguardando 10 segundos...")
+                time.sleep(10)
             falhas += 1
         
         progress_bar.progress((idx + 1) / len(lista_bdrs))
         
-        # Mostrar stats parciais
-        if (idx + 1) % 10 == 0:
-            stats_placeholder.metric(
-                "Progresso",
-                f"{idx+1}/{len(lista_bdrs)}",
-                f"✅ {sucesso} | ⚠️ {falhas}"
-            )
+        # Mostrar stats parciais a cada 5 BDRs
+        if (idx + 1) % 5 == 0:
+            stats_placeholder.markdown(f"""
+            **Progresso**: {idx+1}/{len(lista_bdrs)}
+            - ✅ Sucesso: {sucesso}
+            - ⚠️ Falhas: {falhas}
+            - 🚫 Erros 429: {erro_429_count}
+            """)
         
-        time.sleep(0.5)  # Delay para evitar rate limiting
+        # Delay configurável entre requisições
+        time.sleep(delay_entre_req)
     
     progress_bar.empty()
     status_text.empty()
     stats_placeholder.empty()
     
     if not resultado:
-        st.warning("⚠️ Nenhuma BDR com dados suficientes encontrada")
+        st.error("❌ Nenhuma BDR com dados suficientes encontrada")
+        st.info("""
+        **Possíveis causas:**
+        - Rate limiting do Yahoo Finance (erro 429)
+        - Tickers incorretos
+        - Dados não disponíveis
+        
+        **Soluções:**
+        - Aumente o delay entre requisições
+        - Reduza a quantidade de BDRs
+        - Tente novamente mais tarde
+        """)
+        st.session_state.analisar = False
         st.stop()
     
     # Criar DataFrame
